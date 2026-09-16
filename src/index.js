@@ -26,6 +26,10 @@ while (true) {
       try {
         await bot.handleUpdate(update);
       } catch (error) {
+        if (error.message?.includes('Forbidden: bot was blocked by the user')) {
+          console.warn(`Update ${update.update_id} пропущен: пользователь заблокировал бота.`);
+          continue;
+        }
         console.error(`Ошибка update ${update.update_id}:`, error);
       }
     }
