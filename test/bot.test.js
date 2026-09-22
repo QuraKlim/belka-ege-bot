@@ -2,6 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBot } from '../src/bot.js';
 
+test('subscription outages do not accuse users of being unsubscribed', async () => {
+  const messages = [];
+  const bot = createBot({ call: async () => { throw new Error('network'); },
+    sendMessage: async (...args) => messages.push(args) }, { error() {} });
+  await bot.handleUpdate({ message: { chat: { id: 1 }, from: { id: 1 }, text: '/materials' } });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0][1], /не удалось проверить подписку/);
+  assert.doesNotMatch(messages[0][1], /Ты не подписан/);
+});
+
+test('expired acknowledgements do not stop valid actions', async () => {
+  const messages = [];
+  const bot = createBot({ call: async (method) => {
+    if (method === 'answerCallbackQuery') throw Object.assign(new Error('query is too old'), { status: 400 });
+    return { status: 'member' };
+  }, sendMessage: async (...args) => messages.push(args) }, { warn() {} });
+  await bot.handleUpdate({ callback_query: { id: 'old', data: 'command:help',
+    from: { id: 1 }, message: { chat: { id: 1 } } } });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0][1], /Нажми \/start/);
+});
+
+test('missing callback data and inherited object keys are ignored safely', async () => {
+  const messages = [];
+  const bot = createBot({ call: async () => ({ status: 'member' }),
+    sendMessage: async (...args) => messages.push(args) });
+  for (const data of [undefined, 'material:constructor', 'useful:__proto__']) {
+    await bot.handleUpdate({ callback_query: { id: 'q', data,
+      from: { id: 1 }, message: { chat: { id: 1 } } } });
+  }
+  assert.deepEqual(messages, []);
+});
+
 test('/start отправляет приветствие и клавиатуру', async () => {
   const calls = [];
   const api = { sendPhoto: async (...args) => calls.push(args), call: async () => ({}) };

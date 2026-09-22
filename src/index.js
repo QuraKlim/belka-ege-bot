@@ -1,20 +1,28 @@
 import { createBot } from './bot.js';
+import { createAnalytics } from './analytics.js';
 import { config, validateConfig } from './config.js';
-import { botCommands } from './content.js';
+import { setupTelegram, describeConnectionError } from './startup.js';
 import { TelegramApi } from './telegram.js';
+import { startStatsServer } from './stats-server.js';
+import { createErrorLogger } from './error-notifier.js';
 
 validateConfig();
 const api = new TelegramApi(config.token);
-const bot = createBot(api);
+const logger = createErrorLogger(api, {
+  chatId: config.errorChatId, secrets: [config.token, config.statsToken],
+});
+const analytics = createAnalytics(config.analyticsDir);
+const { secretPath } = await startStatsServer({
+  token: config.statsToken,
+  logger,
+  directory: config.analyticsDir, host: config.statsHost, port: config.statsPort,
+});
+console.log(`Статистика на этом компьютере: http://localhost:${config.statsPort}${secretPath}`);
+// Persist before advancing the polling offset so a storage failure is retried.
+const bot = createBot(api, logger);
 let offset = 0;
 
-await api.call('setMyCommands', {
-  commands: botCommands,
-  scope: { type: 'all_private_chats' },
-});
-await api.call('setChatMenuButton', {
-  menu_button: { type: 'commands' },
-});
+await setupTelegram(api, { logger });
 
 console.log('Бот запущен. Для остановки нажмите Ctrl+C.');
 
@@ -22,6 +30,7 @@ while (true) {
   try {
     const updates = await api.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message', 'callback_query'] });
     for (const update of updates) {
+      analytics.recordUpdate(update);
       offset = update.update_id + 1;
       try {
         await bot.handleUpdate(update);
@@ -30,11 +39,14 @@ while (true) {
           console.warn(`Update ${update.update_id} пропущен: пользователь заблокировал бота.`);
           continue;
         }
-        console.error(`Ошибка update ${update.update_id}:`, error);
+        logger.error(`Ошибка update ${update.update_id}:`, error);
       }
     }
   } catch (error) {
-    console.error('Ошибка получения обновлений:', error.message);
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+    logger.error('Ошибка получения обновлений:', describeConnectionError(error));
+    if (error.status === 409) {
+      console.error('Конфликт получения событий: проверьте, не запущена ли другая копия бота и не установлен ли webhook.');
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.max(3000, (error.retryAfter || 0) * 1000)));
   }
 }

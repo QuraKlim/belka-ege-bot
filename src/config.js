@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { validateStatsToken } from './stats-server.js';
 
 function loadEnv() {
     const envPath = path.resolve('.env');
@@ -27,6 +28,11 @@ function normalizeChannelUsername(value) {
 }
 
 export const config = {
+    errorChatId: process.env.ERROR_CHAT_ID || '',
+    statsToken: process.env.STATS_TOKEN,
+    statsHost: process.env.STATS_HOST || '0.0.0.0',
+    statsPort: Number(process.env.STATS_PORT || 3000),
+    analyticsDir: path.resolve(process.env.ANALYTICS_DIR || 'data'),
     token: process.env.BOT_TOKEN,
     channel: normalizeChannelUsername(process.env.CHANNEL_USERNAME),
     teacher: process.env.TEACHER_USERNAME || '@Belkateacher',
@@ -34,6 +40,13 @@ export const config = {
 };
 
 export function validateConfig() {
+    if (config.errorChatId && !/^[1-9]\d*$/.test(config.errorChatId)) {
+        throw new Error('ERROR_CHAT_ID должен содержать числовой Telegram ID пользователя');
+    }
+    validateStatsToken(config.statsToken);
+    if (!Number.isInteger(config.statsPort) || config.statsPort < 1 || config.statsPort > 65535) {
+        throw new Error('STATS_PORT должен быть целым числом от 1 до 65535');
+    }
     if (!config.token || !/^\d+:[\w-]+$/.test(config.token)) {
         throw new Error('Укажите корректный BOT_TOKEN в файле .env');
     }

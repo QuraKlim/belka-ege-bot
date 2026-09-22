@@ -25,7 +25,7 @@ const subscribedStatuses = new Set([
     'restricted',
 ]);
 
-export function createBot(api, logger = console) {
+export function createBot(api, logger = console, analytics = null) {
     async function isSubscribed(userId) {
         try {
             const member = await api.call('getChatMember', {
@@ -38,15 +38,28 @@ export function createBot(api, logger = console) {
             );
         } catch (error) {
             logger.error('Не удалось проверить подписку:', error.message);
-            return false;
+            return null;
         }
+    }
+
+    async function requireSubscription(chatId, userId, retryCallback) {
+        const subscribed = await isSubscribed(userId);
+        if (subscribed === null) {
+            await api.sendMessage(chatId, interfaceText.subscriptionUnavailable);
+        } else if (!subscribed) {
+            await sendNotSubscribedMessage(chatId, retryCallback);
+        }
+        return subscribed === true;
     }
 
     async function sendFileIfExists(chatId, relativePath, caption) {
         const filePath = path.resolve(relativePath);
         if (fs.existsSync(filePath))
             await api.sendDocument(chatId, filePath, caption);
-        else logger.warn(`Файл не найден: ${filePath}`);
+        else {
+            logger.warn(`Файл не найден: ${filePath}`);
+            await api.sendMessage(chatId, interfaceText.fileUnavailable);
+        }
     }
 
     async function sendEgeFollowUps(chatId) {
@@ -72,17 +85,19 @@ export function createBot(api, logger = console) {
 
     async function handleCallback(query) {
         const chatId = query.message?.chat?.id;
-        if (!chatId) return;
-        await api.call('answerCallbackQuery', { callback_query_id: query.id });
+        if (!chatId || typeof query.data !== 'string') return;
+        try {
+            await api.call('answerCallbackQuery', { callback_query_id: query.id });
+        } catch (error) {
+            if (error.status !== 400 || !/query is too old|query ID is invalid/i.test(error.message)) throw error;
+            logger.warn('Подтверждение кнопки устарело; продолжаем обработку действия.');
+        }
         const isSubscriptionCheck = query.data.startsWith('check|');
         let callbackData = isSubscriptionCheck
             ? query.data.slice('check|'.length)
             : query.data;
 
-        if (!(await isSubscribed(query.from.id))) {
-            await sendNotSubscribedMessage(chatId, callbackData);
-            return;
-        }
+        if (!(await requireSubscription(chatId, query.from.id, callbackData))) return;
 
         // Поддержка старых кнопок из уже отправленных сообщений.
         if (callbackData.startsWith('exam:')) {
@@ -107,7 +122,7 @@ export function createBot(api, logger = console) {
 
         if (callbackData.startsWith('material:')) {
             const key = callbackData.slice('material:'.length);
-            if (!materials[key]) return;
+            if (!Object.hasOwn(materials, key)) return;
             await api.sendMessage(chatId, materials[key]);
             if (key === 'ege' || key === 'essay')
                 await sendEgeFollowUps(chatId);
@@ -117,7 +132,7 @@ export function createBot(api, logger = console) {
 
         if (callbackData.startsWith('useful:')) {
             const key = callbackData.slice('useful:'.length);
-            if (!useful[key]) return;
+            if (!Object.hasOwn(useful, key)) return;
             await api.sendMessage(chatId, useful[key]);
             if (key === 'oge')
                 await sendFileIfExists(
@@ -159,6 +174,8 @@ export function createBot(api, logger = console) {
     }
 
     async function handleUpdate(update) {
+        // Record intent before subscription checks or any Telegram API requests.
+        if (analytics) await analytics.recordUpdate(update);
         if (update.callback_query) return handleCallback(update.callback_query);
         const message = update.message;
         if (!message?.text) return;
@@ -173,11 +190,8 @@ export function createBot(api, logger = console) {
         const knownCommands = new Set(['/materials', '/useful', '/help']);
         if (!knownCommands.has(command))
             return api.sendMessage(message.chat.id, interfaceText.unknownCommand);
-        if (!(await isSubscribed(message.from.id)))
-            return sendNotSubscribedMessage(
-                message.chat.id,
-                `command:${command.slice(1)}`,
-            );
+        if (!(await requireSubscription(message.chat.id, message.from.id,
+            `command:${command.slice(1)}`))) return;
         if (command === '/materials')
             return api.sendMessage(
                 message.chat.id,
